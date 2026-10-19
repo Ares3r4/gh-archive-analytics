@@ -50,6 +50,4 @@ jobs:
         run: |
           cd dbt_project
           dbt deps
-          dbt build
-          # We run it again just to be safe, using explicit paths
-          dbt build --project-dir . --profiles-dir ~/.dbt
+          dbt build --full-refresh --project-dir . --profiles-dir ~/.dbt
