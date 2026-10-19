@@ -14,7 +14,8 @@ models:
       - name: unique_contributors
         tests:
           - dbt_utils.expression_is_true:
-              expression: "<= total_events" # A contributor cannot have more than 1 event
+              arguments:
+                expression: "<= total_events"
 
   - name: dim_developer_leaderboard
     columns:
