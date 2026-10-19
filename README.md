@@ -1,176 +1,283 @@
 # GitHub Archive Analytics
 
-A small analytics project for collecting public GitHub event data from
-[GH Archive](https://www.gharchive.org/), aggregating it in PostgreSQL, and
-viewing repository activity in a React dashboard.
+An end-to-end data engineering project for turning public GitHub event data
+into analytics-ready repository and developer insights. The intended pipeline
+separates raw ingestion from SQL transformation, applies dbt data-quality
+checks, and presents curated results in a React dashboard.
 
-## How it works
+## Project overview
+
+The platform is designed around an ELT workflow: extract hourly JSON archives
+from GH Archive, load the source records into PostgreSQL, and transform them
+inside the warehouse with dbt.
 
 ```text
-GH Archive hourly files
-        |
-        v
-Python ETL (etl/ingest.py) ---> PostgreSQL / Supabase
-                                      ^
-                                      |
-                              React dashboard
+                         ┌─────────────────────┐
+                         │ GH Archive JSON.GZ  │
+                         │ hourly public files │
+                         └──────────┬──────────┘
+                                    │ Extract and load
+                                    ▼
+                         ┌─────────────────────┐
+                         │ Python ingestion    │
+                         │ raw JSON → Postgres │
+                         └──────────┬──────────┘
+                                    │
+                                    ▼
+                         ┌─────────────────────┐
+                         │ raw.raw_gh_events   │
+                         │ PostgreSQL/Supabase │
+                         └──────────┬──────────┘
+                                    │
+                                    ▼
+                 ┌───────────────────────────────────┐
+                 │ dbt transformation layers         │
+                 │                                   │
+                 │  staging → intermediate → marts  │
+                 └─────────────────┬─────────────────┘
+                                   │
+                   ┌───────────────┴────────────────┐
+                   ▼                                ▼
+       ┌────────────────────────┐      ┌──────────────────────────┐
+       │ fct_repo_activity      │      │ dim_developer_leaderboard│
+       │ incremental, repo/day  │      │ developer-level rankings │
+       └────────────┬───────────┘      └─────────────┬────────────┘
+                    └───────────────┬────────────────┘
+                                    │
+                                    ▼
+                         ┌─────────────────────┐
+                         │ Supabase Data API   │
+                         └──────────┬──────────┘
+                                    │
+                                    ▼
+                         ┌─────────────────────┐
+                         │ React + Vite UI     │
+                         └─────────────────────┘
+
+ GitHub Actions: push to main / manual dispatch → dbt deps → dbt run → dbt test
 ```
 
-- **ETL:** Downloads GH Archive JSON files, aggregates events by repository and
-  event date, and refreshes that date's rows in `marts.mart_repo_summary`.
-- **Dashboard:** The Vite/React frontend queries that table directly through
-  Supabase's REST API. It shows the latest available day and lets you switch
-  among up to seven recent available days. It does not require a local Python
-  API/backend server.
-- **dbt:** `dbt_project/` contains a project configuration and model-file
-  placeholders. The current ETL and dashboard use `marts.mart_repo_summary`
-  directly; they do not run dbt as part of loading or displaying data.
+## Data model
 
-## Requirements
+The dbt project follows a three-tier structure:
 
-- Node.js and npm
-- Python 3.10 or later
-- A PostgreSQL database reachable by the ETL (for example, a Supabase project)
-- GH Archive data is fetched from the internet when the ETL runs
+| Layer | Purpose | Current models |
+| --- | --- | --- |
+| **Staging** | Select, type, and normalize source records; retain a close relationship to the raw data. | `stg_gh_events`, `stg_gh_pull_requests` |
+| **Intermediate** | Express reusable business logic and prepare clean inputs for analytics. | `int_developer_daily_commits`, `int_pr_turnaround` |
+| **Marts** | Publish stable analytical outputs for reporting and downstream applications. | `fct_repo_activity`, `dim_developer_leaderboard` |
 
-## Run the dashboard
+`fct_repo_activity` is designed at repository/day grain and uses an incremental
+materialization with `(repo_name, activity_date)` as its unique key. It reports
+event volume, contributor counts, event categories, and last activity.
+`dim_developer_leaderboard` summarizes developer activity and assigns a
+rank. Together, these provide fact- and dimension-oriented analytical
+outputs for repository and contributor reporting.
 
-1. Open a terminal in the `frontend/` directory and install the JavaScript
-   dependencies:
+The dbt tests use `dbt_utils` to validate the composite uniqueness of the
+repository fact grain and to check metric constraints. The models also define
+not-null and uniqueness checks for key fields.
 
-   ```powershell
-   cd frontend
-   npm install
-   ```
+## Technology
 
-2. Create `frontend/.env` with your Supabase project URL and **publishable/anon**
-   key:
-
-   ```dotenv
-   VITE_SUPABASE_URL=https://your-project.supabase.co
-   VITE_SUPABASE_ANON_KEY=your-supabase-publishable-or-anon-key
-   ```
-
-   These values are read by Vite when it starts. Restart the dev server after
-   changing them. Never put a Supabase service-role key in a `VITE_` variable
-   or in frontend code.
-
-3. Start the frontend:
-
-   ```powershell
-   npm run dev
-   ```
-
-   Open the local URL printed by Vite. The dashboard fetches rows directly from
-   Supabase; the data must already exist in the database.
-
-To create a production build, run `npm run build` from `frontend/`. To serve the
-build locally for a preview, run `npm run preview`.
-
-### Supabase access required by the dashboard
-
-The frontend uses the `marts` schema and reads the
-`marts.mart_repo_summary` table. The schema must be exposed through the
-Supabase Data API, and the role associated with the publishable/anon key needs
-`SELECT` access. The expected columns are:
-
-| Column | Purpose |
-| --- | --- |
-| `repo_name` | Repository name; unique together with `event_date` |
-| `event_date` | UTC date for this repository activity row |
-| `total_events` | Total events seen for this repository on this date |
-| `unique_contributors` | Sum of hourly distinct-actor counts for this repository and date |
-| `push_events` | Push events |
-| `pr_events` | Pull request events |
-| `issue_events` | Issue events |
-| `last_active_at` | Latest event timestamp seen for the repository on this date |
-
-If the table, permissions, or browser connection are unavailable, the dashboard
-will show a load error. If Row Level Security (RLS) is enabled, add a `SELECT`
-policy for the `anon` role (or the role used by the publishable key) as well as
-granting table-level `SELECT`.
-
-## Configure and run the ETL
-
-The ETL writes to PostgreSQL directly; it is a batch script, not a server.
-From the repository root, install its Python dependencies:
-
-```powershell
-python -m pip install requests pg8000 python-dotenv
-```
-
-Create a root-level `.env` file with database connection settings:
-
-```dotenv
-DB_HOST=your-database-host
-DB_NAME=postgres
-DB_USER=postgres
-DB_PASSWORD=your-database-password
-DB_PORT=5432
-```
-
-`DB_NAME` and `DB_PORT` default to `postgres` and `5432`. Set `DB_HOST`,
-`DB_USER`, and `DB_PASSWORD` to match your database. Keep this file private;
-do not commit database credentials.
-
-Run the default ingestion job from the repository root:
-
-```powershell
-python -m etl.ingest
-```
-
-By default, this targets **yesterday in UTC** and processes each available
-hourly GH Archive file in full. To limit the number of events per hourly file,
-use `--limit 5000` or pass a limit to
-`download_and_ingest_day(year, month, day, limit=...)`.
-
-The database table must exist before running the script. The ETL expects
-`marts.mart_repo_summary` to have the columns listed above and a unique
-constraint or primary key on `(repo_name, event_date)`.
-
-### Refreshing an ingested date
-
-The ETL replaces all mart rows for a date after processing its hourly files.
-Use `--force` to reprocess a date whose hours are already marked successful.
-Contributor counts are summed from hourly distinct-actor counts, so they are
-not globally deduplicated across hours or repositories.
+- **Ingestion:** Python, GH Archive hourly JSON.GZ files
+- **Warehouse:** PostgreSQL / Supabase
+- **Transformations and tests:** dbt Core, `dbt-postgres`, `dbt_utils`
+- **Orchestration/CI:** GitHub Actions
+- **Dashboard:** React, Vite, Supabase JavaScript client
 
 ## Repository layout
 
 ```text
 .
+├── .github/
+│   └── workflows/
+│       └── dbt_pipeline.yml          # dbt CI workflow
+├── dbt_project/
+│   ├── models/
+│   │   ├── staging/
+│   │   │   ├── stg_gh_events.sql
+│   │   │   ├── stg_gh_pull_requests.sql
+│   │   │   └── _src_gh_archive.yml  # Raw source declaration
+│   │   ├── intermediate/
+│   │   │   ├── int_developer_daily_commits.sql
+│   │   │   └── int_pr_turnaround.sql
+│   │   ├── marts/
+│   │   │   ├── fct_repo_activity.sql
+│   │   │   ├── dim_developer_leaderboard.sql
+│   │   │   └── schema.yml            # Model-level data tests
+│   │   └── sources.yml
+│   ├── dbt_project.yml
+│   ├── packages.yml                  # dbt_utils dependency
+│   └── profiles.yml
 ├── etl/
-│   ├── config.py                # Loads PostgreSQL settings from .env
-│   ├── ingest.py                # Downloads and refreshes daily GH Archive summaries
-│   └── query_marts.py           # Small command-line query example
+│   ├── config.py                     # Loads database settings
+│   ├── db.py                         # PostgreSQL operations
+│   ├── ingest.py                     # GH Archive ingestion entry point
+│   └── requirements.txt
 ├── frontend/
 │   ├── src/
-│   │   ├── App.jsx              # Repository activity dashboard
-│   │   └── supabaseClient.js    # Supabase browser client
-│   └── package.json
-└── dbt_project/                 # dbt project configuration and model files
+│   │   ├── App.jsx
+│   │   ├── index.css
+│   │   └── supabaseClient.js
+│   ├── package.json
+│   └── vite.config.js
+└── README.md
 ```
 
-## Troubleshooting
+## Prerequisites
 
-- **Dashboard reports a Supabase error:** Check the `frontend/.env` values,
-  restart Vite, expose the `marts` schema in Supabase, and verify `SELECT`
-  permissions and an applicable RLS `SELECT` policy on `mart_repo_summary`.
-- **Dashboard reports `TypeError: Failed to fetch`:** Confirm that
-  `VITE_SUPABASE_URL` is the project's API URL (`https://<project-ref>.supabase.co`)
-  and that the publishable/anon key belongs to the same project. Restart Vite
-  after changing `frontend/.env`. Also check that the Supabase project is
-  available and that the browser or network is not blocking requests to it.
-  SQL permission checks do not verify that the browser can reach the API.
-- **Dashboard reports duplicate React keys:** Check for duplicate repository
-  rows for the same date. The mart should have a unique constraint or primary
-  key on `(repo_name, event_date)`; the ETL writes one summary row per
-  repository per date.
-- **Dashboard loads but shows older activity:** The page reads what is already
-  stored in the table. Run the ETL for the needed date and check its output for
-  unavailable GH Archive hours or database errors.
-- **ETL cannot connect:** Check the root `.env` database host, port, username,
-  password, database name, and network access.
-- **A completed date has no rows after a rerun:** The ETL skips hours already
-  marked successful unless `--force` is used. Re-run that date with `--force`
-  so its daily summary is rebuilt from the archived files.
+- Python 3.10 or later
+- Node.js and npm
+- PostgreSQL or Supabase database access
+- GitHub repository access to configure Actions secrets
+
+## Setup
+
+### 1. Configure database credentials
+
+Create a private `.env` file in the repository root. The tracked
+`dbt_project/.env.example` provides a template:
+
+```dotenv
+DB_HOST=your-database-host
+DB_NAME=postgres
+DB_USER=your-database-user
+DB_PASSWORD=your-database-password
+DB_PORT=5432
+```
+
+Do not commit credentials. The dbt source declaration expects a raw table named
+`raw.raw_gh_events` with the event fields referenced by the staging models,
+including `id`, `type`, `actor_id`, `actor_login`, `repo_id`, `repo_name`,
+`payload`, and `created_at`.
+
+### 2. Ingest GH Archive data
+
+From the repository root, create and activate a Python environment, then
+install the ingestion dependencies:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install pg8000 python-dotenv
+```
+
+Run the current ingestion entry point:
+
+```powershell
+python -m etl.ingest
+```
+
+The script accepts a target date and an optional per-hour event limit:
+
+```powershell
+python -m etl.ingest --date 2024-01-15
+python -m etl.ingest --date 2024-01-15 --limit 5000
+python -m etl.ingest --date 2024-01-15 --force
+```
+
+The default date is yesterday in UTC. **Implementation note:** in this
+checkout, `etl.ingest` still aggregates events and writes to the legacy
+`marts.mart_repo_summary` table; it does not yet load raw JSON records into
+`raw.raw_gh_events`. The ingestion target must be aligned with the raw table
+contract above before this command can serve as the ELT load step for dbt.
+
+### 3. Install and run dbt
+
+Install the PostgreSQL adapter and dbt packages:
+
+```powershell
+python -m pip install dbt-core dbt-postgres
+Set-Location dbt_project
+dbt deps
+dbt debug
+```
+
+`profiles.yml` reads `DB_HOST`, `DB_USER`, and `DB_PASSWORD` from the
+environment, with `DB_NAME` defaulting to `postgres`. Configure those values
+for the shell before running dbt. Build the models and run their tests:
+
+```powershell
+dbt run
+dbt test
+```
+
+The normal `dbt run` uses the fact model's incremental materialization. To
+rebuild it from the full source, use:
+
+```powershell
+dbt run --full-refresh
+```
+
+### 4. Configure and run the React dashboard
+
+Create `frontend/.env` with the Supabase project API URL and publishable/anon
+key:
+
+```dotenv
+VITE_SUPABASE_URL=https://your-project.supabase.co
+VITE_SUPABASE_ANON_KEY=your-supabase-publishable-or-anon-key
+```
+
+Never place a Supabase service-role key in a `VITE_` variable or frontend
+source. The schema must be exposed through the Supabase Data API, and the
+dashboard role needs `USAGE` on the schema, `SELECT` on its table, and an
+applicable Row Level Security policy if RLS is enabled.
+
+Install dependencies and start the local development server:
+
+```powershell
+Set-Location ..\frontend
+npm install
+npm run dev
+```
+
+Create and preview a production build with:
+
+```powershell
+npm run build
+npm run preview
+```
+
+The frontend uses the Supabase Data API directly; it does not require a
+separate local application server.
+
+## Continuous integration
+
+The GitHub Actions workflow at `.github/workflows/dbt_pipeline.yml` runs on
+pushes to `main` and can also be started manually with `workflow_dispatch`.
+It installs dbt, resolves packages, rebuilds the project, and executes dbt
+tests.
+
+Configure these repository Actions secrets:
+
+| Secret | Purpose |
+| --- | --- |
+| `DB_HOST` | PostgreSQL host |
+| `DB_USER` | Database user |
+| `DB_PASSWORD` | Database password |
+
+The workflow currently connects on port `6543` and uses the `postgres`
+database. Ensure those connection details match the target database. Secrets
+are provided to the runner through GitHub's encrypted Actions secret store and
+must not be committed to the repository.
+
+## Current implementation status
+
+This README documents the intended end-state architecture. The checked-in
+components are not yet fully wired to that design: `etl/ingest.py` currently
+aggregates events and writes to `marts.mart_repo_summary` rather than loading
+raw JSON rows into `raw.raw_gh_events`; the React dashboard currently queries
+`mart_repo_summary`; and the GitHub Actions workflow uses
+`dbt run --full-refresh` rather than an incremental run. The dbt models declare
+the intended raw source and analytical outputs, but end-to-end deployment
+requires aligning the ingestion target, database schemas, and frontend table
+contract with those models.
+
+## Data handling
+
+GH Archive contains public GitHub event data. Keep database credentials and
+Supabase service-role keys out of source control. Use only a Supabase
+publishable/anon key in the browser, with database grants and Row Level
+Security policies configured for the intended public read access.

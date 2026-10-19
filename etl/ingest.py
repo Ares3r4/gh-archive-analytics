@@ -1,10 +1,10 @@
-﻿"""GH Archive -> marts.mart_repo_summary ETL.
+﻿"""GH Archive -> raw.raw_gh_events ELT.
 
 Usage:
     python -m etl.ingest                 # yesterday UTC, full day
     python -m etl.ingest --date 2024-01-15
     python -m etl.ingest --date 2024-01-15 --limit 5000
-    python -m etl.ingest --date 2024-01-15 --force   # ignore skip-guard
+    python -m etl.ingest --date 2024-01-15 --force
 """
 
 from __future__ import annotations
@@ -37,10 +37,6 @@ HEADERS = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Fetch + parse
-# ---------------------------------------------------------------------------
-
 def fetch_hour(d: date, hour: int, limit: int | None) -> list[dict]:
     """Download one hourly GH Archive file and return up to `limit` events."""
     url = GH_ARCHIVE_URL.format(y=d.year, m=d.month, d=d.day, h=hour)
@@ -52,7 +48,7 @@ def fetch_hour(d: date, hour: int, limit: int | None) -> list[dict]:
         raw = resp.read()
     except urllib.error.HTTPError as e:
         if e.code == 404:
-            log.error("404 NOT FOUND: %s — this hour may not exist in the archive", url)
+            log.error("404 NOT FOUND: %s — this hour may not exist", url)
         else:
             log.warning("skip %s: HTTP %s", url, e.code)
         return []
@@ -72,129 +68,97 @@ def fetch_hour(d: date, hour: int, limit: int | None) -> list[dict]:
     return events
 
 
-def event_date(event: dict) -> date:
-    ts = event["created_at"]                     # "2024-01-15T03:00:00Z"
-    return datetime.fromisoformat(ts.replace("Z", "+00:00")) \
-                   .astimezone(timezone.utc).date()
-
-
-# ---------------------------------------------------------------------------
-# Aggregate a batch of events into per-repo rows for a given day
-# ---------------------------------------------------------------------------
-
-def aggregate(events: list[dict], day: date) -> list[dict]:
-    """Bucket events by repo, computing the mart columns. Drops rows whose
-    own created_at isn't on `day` (late arrivals across midnight boundaries)."""
-    buckets: dict[str, dict] = {}
-
-    for ev in events:
-        if event_date(ev) != day:
-            continue
-        repo = ev.get("repo", {}).get("name")
-        if not repo:
-            continue
-
-        b = buckets.setdefault(repo, {
-            "repo_name": repo,
-            "total_events": 0,
-            "actors": set(),
-            "push_events": 0,
-            "pr_events": 0,
-            "issue_events": 0,
-            "last_active_at": None,
-        })
-
-        b["total_events"] += 1
-        actor = ev.get("actor", {}).get("login")
-        if actor:
-            b["actors"].add(actor)
-
-        etype = ev.get("type", "")
-        if etype == "PushEvent":
-            b["push_events"] += 1
-        elif etype in ("PullRequestEvent", "PullRequestReviewEvent"):
-            b["pr_events"] += 1
-        elif etype in ("IssuesEvent", "IssueCommentEvent"):
-            b["issue_events"] += 1
-
-        ts = ev.get("created_at")
-        if ts and (b["last_active_at"] is None or ts > b["last_active_at"]):
-            b["last_active_at"] = ts
-
+def insert_raw_events(conn, events: list[dict]) -> int:
+    """Insert events directly into the raw layer in one fast bulk query."""
+    if not events:
+        return 0
+        
+    # 1. Prepare the rows
     rows = []
-    for b in buckets.values():
-        b["unique_contributors"] = len(b.pop("actors"))
-        rows.append(b)
-    return rows
-
-
-# ---------------------------------------------------------------------------
-# Day orchestration
-# ---------------------------------------------------------------------------
-
+    for ev in events:
+        actor = ev.get("actor", {})
+        repo = ev.get("repo", {})
+        
+        ts_str = ev.get("created_at")
+        created_at = datetime.fromisoformat(ts_str.replace("Z", "+00:00")) if ts_str else None
+        
+        rows.append((
+            ev.get("id"),
+            ev.get("type"),
+            actor.get("id"),
+            actor.get("login"),
+            repo.get("id"),
+            repo.get("name"),
+            json.dumps(ev.get("payload", {})),
+            created_at
+        ))
+        
+    try:
+        # 2. Build the query dynamically
+        # We create a string like: (%s, %s, %s, ...), (%s, %s, %s, ...)
+        placeholders = ",".join(["(%s, %s, %s, %s, %s, %s, %s, %s)"] * len(rows))
+        
+        insert_sql = f"""
+            INSERT INTO raw.raw_gh_events 
+            (id, type, actor_id, actor_login, repo_id, repo_name, payload, created_at)
+            VALUES {placeholders}
+            ON CONFLICT (id) DO NOTHING;
+        """
+        
+        # 3. Flatten the list of tuples into a single tuple of values
+        flat_values = [item for row in rows for item in row]
+        
+        # 4. Execute
+        conn.run(insert_sql, *flat_values)
+        conn.run("COMMIT")
+        return len(rows)
+        
+    except Exception as e:
+        log.error("Bulk insert failed: %s", e)
+        conn.run("ROLLBACK")
+        return 0
+    
 def download_and_ingest_day(year: int, month: int, day: int,
                             limit: int | None = None,
                             force: bool = False) -> None:
     d = date(year, month, day)
     conn = db.connect()
+    
     try:
-        all_rows: list[dict] = []
-
+        total_events = 0
         for hour in range(24):
             if not force and db.already_done(conn, d, hour):
                 log.info("skip %s hour %02d: already success", d, hour)
                 continue
 
             db.mark_started(conn, d, hour)
+            conn.run("COMMIT") # commit the 'started' status
+            
             try:
                 events = fetch_hour(d, hour, limit)
-                hour_rows = aggregate(events, d)
-                all_rows.extend(hour_rows)
-                db.mark_finished(conn, d, hour, "success", rows=len(events))
-                log.info("%s %02d: %d events, %d repos",
-                         d, hour, len(events), len(hour_rows))
+                if not events:
+                    db.mark_finished(conn, d, hour, "success", rows=0)
+                    conn.run("COMMIT")
+                    continue
+                    
+                log.info("%s %02d: downloaded %d events. Inserting to raw...", d, hour, len(events))
+                inserted = insert_raw_events(conn, events)
+                total_events += inserted
+                
+                db.mark_finished(conn, d, hour, "success", rows=inserted)
+                conn.run("COMMIT")
+                log.info("%s %02d: inserted %d new events.", d, hour, inserted)
+                
             except Exception as e:
                 db.mark_finished(conn, d, hour, "failed", error=str(e))
+                conn.run("COMMIT")
                 log.exception("hour %02d failed", hour)
-                # Do not refresh the mart on a partial day.
                 return
 
-        if not db.day_is_complete(conn, d):
-            log.warning("%s not complete; mart left untouched", d)
-            return
-
-        # Merge per-hour repo rows into one per-repo row for the day.
-        merged = _merge_hourly_rows(all_rows)
-        db.refresh_day(conn, d, merged)
-        log.info("refreshed mart for %s (%d repos)", d, len(merged))
+        log.info("Finished ingestion for %s. Total new events: %d", d, total_events)
     finally:
         conn.close()
 
-
-def _merge_hourly_rows(rows: list[dict]) -> list[dict]:
-    """Sum counters and take max last_active_at across hourly buckets."""
-    by_repo: dict[str, dict] = {}
-    for r in rows:
-        m = by_repo.get(r["repo_name"])
-        if m is None:
-            by_repo[r["repo_name"]] = dict(r)
-            continue
-        m["total_events"] += r["total_events"]
-        # NOTE: unique_contributors across hours is NOT a true distinct count.
-        # It's the sum of per-hour distinct counts (an upper bound). Acceptable
-        # for a dashboard; a true count needs a separate actor table.
-        m["unique_contributors"] += r["unique_contributors"]
-        m["push_events"] += r["push_events"]
-        m["pr_events"] += r["pr_events"]
-        m["issue_events"] += r["issue_events"]
-        if (r["last_active_at"] or "") > (m["last_active_at"] or ""):
-            m["last_active_at"] = r["last_active_at"]
-    return list(by_repo.values())
-
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
 
 def _parse_args(argv):
     p = argparse.ArgumentParser()

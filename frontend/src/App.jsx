@@ -23,6 +23,7 @@ const dateFormat = new Intl.DateTimeFormat("en-US", {
 });
 const sortableColumns = [
   { key: "repo_name", label: "Repository", type: "text" },
+  { key: "activity_date", label: "Activity date", type: "date" },
   { key: "total_events", label: "Events", type: "number" },
   { key: "unique_contributors", label: "Contributors", type: "number" },
   { key: "push_events", label: "Pushes", type: "number" },
@@ -115,8 +116,8 @@ function App() {
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState({ key: "total_events", direction: "desc" });
   const [lastUpdated, setLastUpdated] = useState(null);
-  const [activeDay, setActiveDay] = useState(null);
-  const [availableDays, setAvailableDays] = useState([]);
+  const [activeActivityDate, setActiveActivityDate] = useState(null);
+  const [availableActivityDates, setAvailableActivityDates] = useState([]);
 
   useEffect(() => {
     if (!supabase) {
@@ -132,41 +133,44 @@ function App() {
 
       try {
         const { data: latest, error: latestError } = await supabase
-          .from("mart_repo_summary")
-          .select("event_date")
-          .order("event_date", { ascending: false })
+          .from("fct_repo_activity")
+          .select("activity_date")
+          .order("activity_date", { ascending: false })
           .limit(1);
 
         if (latestError) throw latestError;
 
-        const latestDay = latest?.[0]?.event_date ?? null;
-        if (!latestDay) {
+        const latestActivityDate = latest?.[0]?.activity_date ?? null;
+        if (!latestActivityDate) {
           if (!cancelled) {
             setRepositories([]);
-            setActiveDay(null);
-            setAvailableDays([]);
+            setActiveActivityDate(null);
+            setAvailableActivityDates([]);
             setLastUpdated(new Date());
             setLoading(false);
           }
           return;
         }
 
-        const days = [];
-        const seenDays = new Set();
-        for (let from = 0; days.length < 7; from += PAGE_SIZE) {
-          const { data, error: daysError } = await supabase
-            .from("mart_repo_summary")
-            .select("event_date")
-            .order("event_date", { ascending: false })
+        const activityDates = [];
+        const seenActivityDates = new Set();
+        for (let from = 0; activityDates.length < 7; from += PAGE_SIZE) {
+          const { data, error: datesError } = await supabase
+            .from("fct_repo_activity")
+            .select("activity_date")
+            .order("activity_date", { ascending: false })
             .range(from, from + PAGE_SIZE - 1);
 
-          if (daysError) throw daysError;
+          if (datesError) throw datesError;
 
           for (const row of data ?? []) {
-            if (row.event_date && !seenDays.has(row.event_date)) {
-              seenDays.add(row.event_date);
-              days.push(row.event_date);
-              if (days.length === 7) break;
+            if (
+              row.activity_date &&
+              !seenActivityDates.has(row.activity_date)
+            ) {
+              seenActivityDates.add(row.activity_date);
+              activityDates.push(row.activity_date);
+              if (activityDates.length === 7) break;
             }
           }
 
@@ -174,8 +178,8 @@ function App() {
         }
 
         if (!cancelled) {
-          setAvailableDays(days);
-          setActiveDay(latestDay);
+          setAvailableActivityDates(activityDates);
+          setActiveActivityDate(latestActivityDate);
         }
       } catch (loadError) {
         if (!cancelled) {
@@ -192,7 +196,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!supabase || !activeDay) return undefined;
+    if (!supabase || !activeActivityDate) return undefined;
 
     let cancelled = false;
 
@@ -204,11 +208,11 @@ function App() {
         const allRows = [];
         for (let from = 0; ; from += PAGE_SIZE) {
           const { data, error: queryError } = await supabase
-            .from("mart_repo_summary")
+            .from("fct_repo_activity")
             .select(
-              "repo_name,total_events,unique_contributors,push_events,pr_events,issue_events,last_active_at",
+              "repo_name,activity_date,total_events,unique_contributors,push_events,pr_events,issue_events,last_active_at",
             )
-            .eq("event_date", activeDay)
+            .eq("activity_date", activeActivityDate)
             .order("total_events", { ascending: false })
             .range(from, from + PAGE_SIZE - 1);
 
@@ -232,7 +236,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [activeDay]);
+  }, [activeActivityDate]);
 
   const metrics = useMemo(
     () =>
@@ -304,7 +308,7 @@ function App() {
             <h1>Activity overview</h1>
             <p className="page-subtitle">
               A snapshot of the projects moving open source forward
-              {activeDay ? ` on ${displayDay(activeDay)}` : ""}.
+              {activeActivityDate ? ` on ${displayDay(activeActivityDate)}` : ""}.
             </p>
           </div>
           <div className="updated-chip">
@@ -317,18 +321,18 @@ function App() {
           </div>
         </div>
 
-        {availableDays.length > 1 && (
+        {availableActivityDates.length > 1 && (
           <div className="day-picker" role="group" aria-label="Select activity day">
-            {availableDays.slice(0, 7).map((day) => (
+            {availableActivityDates.slice(0, 7).map((activityDate) => (
               <button
-                key={day}
+                key={activityDate}
                 type="button"
-                className={`day-chip${day === activeDay ? " day-chip-active" : ""}`}
-                onClick={() => setActiveDay(day)}
+                className={`day-chip${activityDate === activeActivityDate ? " day-chip-active" : ""}`}
+                onClick={() => setActiveActivityDate(activityDate)}
                 disabled={loading}
-                aria-pressed={day === activeDay}
+                aria-pressed={activityDate === activeActivityDate}
               >
-                {displayDay(day)}
+                {displayDay(activityDate)}
               </button>
             ))}
           </div>
@@ -395,8 +399,8 @@ function App() {
               <p>{error}</p>
               {!supabaseConfigError && (
                 <p className="error-hint">
-                  Confirm <code>marts</code> is an exposed schema in Supabase and that
-                  the anon role has SELECT access to <code>mart_repo_summary</code>.
+                  Confirm <code>public</code> is an exposed schema in Supabase and that
+                  the anon role has SELECT access to <code>fct_repo_activity</code>.
                 </p>
               )}
             </div>
@@ -429,6 +433,9 @@ function App() {
                             </span>
                             <ArrowUpRight className="repo-link-icon" size={14} aria-hidden="true" />
                           </div>
+                        </td>
+                        <td className="date-cell">
+                          {displayDay(repository.activity_date)}
                         </td>
                         <td className="number-cell event-value">
                           {numberFormat.format(asNumber(repository.total_events))}

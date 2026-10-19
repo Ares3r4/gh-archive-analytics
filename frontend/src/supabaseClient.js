@@ -11,5 +11,5 @@ export const supabaseConfigError =
 export const supabase = supabaseConfigError
   ? null
   : createClient(supabaseUrl, supabaseAnonKey, {
-      db: { schema: "marts" },
+      db: { schema: "public" },
     });
