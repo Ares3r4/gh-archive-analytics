@@ -38,7 +38,7 @@ jobs:
                 password: ${{ secrets.DB_PASSWORD }}
                 port: 6543
                 dbname: postgres
-                schema: dbt_ci
+                schema: public
                 threads: 4
           EOF
 
@@ -49,4 +49,7 @@ jobs:
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
         run: |
           cd dbt_project
+          dbt deps
           dbt build
+          # We run it again just to be safe, using explicit paths
+          dbt build --project-dir . --profiles-dir ~/.dbt
