@@ -42,6 +42,29 @@ function displayDate(value) {
   return Number.isNaN(date.getTime()) ? "No activity" : dateFormat.format(date);
 }
 
+function displayDay(value) {
+  if (!value) return "—";
+  const date = new Date(`${value}T00:00:00Z`);
+  return Number.isNaN(date.getTime())
+    ? value
+    : new Intl.DateTimeFormat("en-US", {
+        dateStyle: "long",
+        timeZone: "UTC",
+      }).format(date);
+}
+
+function getErrorMessage(error) {
+  if (
+    error &&
+    typeof error === "object" &&
+    "message" in error &&
+    typeof error.message === "string"
+  ) {
+    return error.message;
+  }
+  return "The repository data could not be loaded.";
+}
+
 function SortButton({ column, sort, onSort }) {
   const active = sort.key === column.key;
   const Icon = active ? (sort.direction === "asc" ? ArrowUp : ArrowDown) : ArrowDownUp;
@@ -92,6 +115,8 @@ function App() {
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState({ key: "total_events", direction: "desc" });
   const [lastUpdated, setLastUpdated] = useState(null);
+  const [activeDay, setActiveDay] = useState(null);
+  const [availableDays, setAvailableDays] = useState([]);
 
   useEffect(() => {
     if (!supabase) {
@@ -101,7 +126,77 @@ function App() {
 
     let cancelled = false;
 
-    async function loadRepositories() {
+    async function loadAvailableDays() {
+      setLoading(true);
+      setError(null);
+
+      try {
+        const { data: latest, error: latestError } = await supabase
+          .from("mart_repo_summary")
+          .select("event_date")
+          .order("event_date", { ascending: false })
+          .limit(1);
+
+        if (latestError) throw latestError;
+
+        const latestDay = latest?.[0]?.event_date ?? null;
+        if (!latestDay) {
+          if (!cancelled) {
+            setRepositories([]);
+            setActiveDay(null);
+            setAvailableDays([]);
+            setLastUpdated(new Date());
+            setLoading(false);
+          }
+          return;
+        }
+
+        const days = [];
+        const seenDays = new Set();
+        for (let from = 0; days.length < 7; from += PAGE_SIZE) {
+          const { data, error: daysError } = await supabase
+            .from("mart_repo_summary")
+            .select("event_date")
+            .order("event_date", { ascending: false })
+            .range(from, from + PAGE_SIZE - 1);
+
+          if (daysError) throw daysError;
+
+          for (const row of data ?? []) {
+            if (row.event_date && !seenDays.has(row.event_date)) {
+              seenDays.add(row.event_date);
+              days.push(row.event_date);
+              if (days.length === 7) break;
+            }
+          }
+
+          if (!data || data.length < PAGE_SIZE) break;
+        }
+
+        if (!cancelled) {
+          setAvailableDays(days);
+          setActiveDay(latestDay);
+        }
+      } catch (loadError) {
+        if (!cancelled) {
+          setError(getErrorMessage(loadError));
+          setLoading(false);
+        }
+      }
+    }
+
+    loadAvailableDays();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!supabase || !activeDay) return undefined;
+
+    let cancelled = false;
+
+    async function loadDay() {
       setLoading(true);
       setError(null);
 
@@ -113,6 +208,7 @@ function App() {
             .select(
               "repo_name,total_events,unique_contributors,push_events,pr_events,issue_events,last_active_at",
             )
+            .eq("event_date", activeDay)
             .order("total_events", { ascending: false })
             .range(from, from + PAGE_SIZE - 1);
 
@@ -126,28 +222,17 @@ function App() {
           setLastUpdated(new Date());
         }
       } catch (loadError) {
-        if (!cancelled) {
-          const message =
-            loadError &&
-            typeof loadError === "object" &&
-            "message" in loadError &&
-            typeof loadError.message === "string"
-              ? loadError.message
-              : null;
-          setError(
-            message || "The repository data could not be loaded.",
-          );
-        }
+        if (!cancelled) setError(getErrorMessage(loadError));
       } finally {
         if (!cancelled) setLoading(false);
       }
     }
 
-    loadRepositories();
+    loadDay();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [activeDay]);
 
   const metrics = useMemo(
     () =>
@@ -218,7 +303,8 @@ function App() {
             <div className="eyebrow"><span /> OPEN SOURCE PULSE</div>
             <h1>Activity overview</h1>
             <p className="page-subtitle">
-              A snapshot of the projects moving open source forward.
+              A snapshot of the projects moving open source forward
+              {activeDay ? ` on ${displayDay(activeDay)}` : ""}.
             </p>
           </div>
           <div className="updated-chip">
@@ -231,12 +317,29 @@ function App() {
           </div>
         </div>
 
+        {availableDays.length > 1 && (
+          <div className="day-picker" role="group" aria-label="Select activity day">
+            {availableDays.slice(0, 7).map((day) => (
+              <button
+                key={day}
+                type="button"
+                className={`day-chip${day === activeDay ? " day-chip-active" : ""}`}
+                onClick={() => setActiveDay(day)}
+                disabled={loading}
+                aria-pressed={day === activeDay}
+              >
+                {displayDay(day)}
+              </button>
+            ))}
+          </div>
+        )}
+
         <section className="metrics-grid" aria-label="Activity summary">
           <MetricCard
             icon={Activity}
             label="Total events tracked"
             value={loading || error ? "—" : numberFormat.format(metrics.events)}
-            detail="Across all tracked repositories"
+            detail="Across repositories on the selected day"
             accent="violet"
           />
           <MetricCard
@@ -250,7 +353,7 @@ function App() {
             icon={Users}
             label="Unique contributors"
             value={loading || error ? "—" : numberFormat.format(metrics.contributors)}
-            detail="Per-repository counts summed; contributors may overlap"
+            detail="Hourly counts are summed; contributors may overlap"
             accent="green"
           />
         </section>
@@ -314,7 +417,7 @@ function App() {
                     <LoadingRows />
                   ) : visibleRepositories.length ? (
                     visibleRepositories.map((repository, index) => (
-                      <tr key={repository.repo_name ?? index}>
+                      <tr key={`${repository.repo_name ?? "unknown"}-${index}`}>
                         <td>
                           <div className="repo-cell">
                             <span className={`repo-rank${index < 3 && !search ? " repo-rank-top" : ""}`}>

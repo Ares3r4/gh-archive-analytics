@@ -1,16 +1,19 @@
 import os
 from dotenv import load_dotenv
 
+load_dotenv()
 
-load_dotenv(override=True)
+def _require(name: str) -> str:
+    value = os.environ.get(name)
+    if not value:
+        raise RuntimeError(
+            f"Missing required environment variable {name!r}. "
+            "Create a .env file at the repo root (see .env.example)."
+        )
+    return value
 
-raw_host = os.getenv("DB_HOST", "")
-clean_host = raw_host.replace("https://", "").replace("http://", "").split("/")[0].strip()
-
-DB_CONFIG = {
-    "host": clean_host,
-    "dbname": os.getenv("DB_NAME", "postgres"),
-    "user": os.getenv("DB_USER", "postgres"),
-    "password": os.getenv("DB_PASSWORD"),
-    "port": int(os.getenv("DB_PORT", "5432")),
-}
+DB_HOST = _require("DB_HOST")
+DB_USER = _require("DB_USER")
+DB_PASSWORD = _require("DB_PASSWORD")
+DB_NAME = os.environ.get("DB_NAME", "postgres")
+DB_PORT = int(os.environ.get("DB_PORT", "5432"))

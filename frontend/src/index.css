@@ -192,6 +192,45 @@ h1 {
   font-size: 13px;
 }
 
+.day-picker {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  margin: -8px 0 22px;
+  padding: 2px 1px 8px;
+  scrollbar-color: #364154 #101722;
+  scrollbar-width: thin;
+}
+
+.day-chip {
+  flex: 0 0 auto;
+  padding: 8px 11px;
+  border: 1px solid #293447;
+  border-radius: 7px;
+  background: rgba(16, 23, 35, 0.72);
+  color: #9aa7bc;
+  font-size: 10px;
+  cursor: pointer;
+  transition: border-color 120ms ease, color 120ms ease, background 120ms ease;
+}
+
+.day-chip:hover:not(:disabled),
+.day-chip:focus-visible {
+  border-color: #7568c6;
+  color: #d6ceff;
+}
+
+.day-chip-active {
+  border-color: #6257a7;
+  background: rgba(105, 91, 181, 0.2);
+  color: #d6ceff;
+}
+
+.day-chip:disabled:not(.day-chip-active) {
+  cursor: wait;
+  opacity: 0.55;
+}
+
 .updated-chip {
   gap: 8px;
   padding: 9px 12px;

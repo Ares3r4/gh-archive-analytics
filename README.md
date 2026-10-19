@@ -16,10 +16,12 @@ Python ETL (etl/ingest.py) ---> PostgreSQL / Supabase
                               React dashboard
 ```
 
-- **ETL:** Downloads GH Archive JSON files, aggregates events by repository,
-  and upserts counts into `marts.mart_repo_summary`.
+- **ETL:** Downloads GH Archive JSON files, aggregates events by repository and
+  event date, and refreshes that date's rows in `marts.mart_repo_summary`.
 - **Dashboard:** The Vite/React frontend queries that table directly through
-  Supabase's REST API. It does not require a local Python API/backend server.
+  Supabase's REST API. It shows the latest available day and lets you switch
+  among up to seven recent available days. It does not require a local Python
+  API/backend server.
 - **dbt:** `dbt_project/` contains a project configuration and model-file
   placeholders. The current ETL and dashboard use `marts.mart_repo_summary`
   directly; they do not run dbt as part of loading or displaying data.
@@ -74,15 +76,19 @@ Supabase Data API, and the role associated with the publishable/anon key needs
 
 | Column | Purpose |
 | --- | --- |
-| `repo_name` | Repository name; unique key for upserts |
-| `total_events` | Total events seen |
-| `unique_contributors` | Distinct actors counted for an ingested hour |
+| `repo_name` | Repository name; unique together with `event_date` |
+| `event_date` | UTC date for this repository activity row |
+| `total_events` | Total events seen for this repository on this date |
+| `unique_contributors` | Sum of hourly distinct-actor counts for this repository and date |
 | `push_events` | Push events |
 | `pr_events` | Pull request events |
 | `issue_events` | Issue events |
-| `last_active_at` | Latest event timestamp seen for the repository |
+| `last_active_at` | Latest event timestamp seen for the repository on this date |
 
-If the table or permissions are missing, the dashboard will show a load error.
+If the table, permissions, or browser connection are unavailable, the dashboard
+will show a load error. If Row Level Security (RLS) is enabled, add a `SELECT`
+policy for the `anon` role (or the role used by the publishable key) as well as
+granting table-level `SELECT`.
 
 ## Configure and run the ETL
 
@@ -113,24 +119,21 @@ Run the default ingestion job from the repository root:
 python -m etl.ingest
 ```
 
-By default, this targets **yesterday in UTC** and processes at most 5,000
-events from each hourly GH Archive file. To ingest a different date or change
-the per-hour limit, call `download_and_ingest_day(year, month, day, limit=...)`
-from `etl.ingest`; use `limit=None` to process each available hour in full.
+By default, this targets **yesterday in UTC** and processes each available
+hourly GH Archive file in full. To limit the number of events per hourly file,
+use `--limit 5000` or pass a limit to
+`download_and_ingest_day(year, month, day, limit=...)`.
 
 The database table must exist before running the script. The ETL expects
 `marts.mart_repo_summary` to have the columns listed above and a unique
-constraint or primary key on `repo_name`.
+constraint or primary key on `(repo_name, event_date)`.
 
-### Important: repeated runs add counts
+### Refreshing an ingested date
 
-The ETL uses an upsert. For an existing repository, it **adds** the newly
-processed event counts to the stored totals and keeps the later
-`last_active_at`. It does not delete old rows or replace a day's previous
-counts. Re-ingesting a date that was already loaded will therefore count those
-events again. The contributor value is updated using the larger of the stored
-count and the count from the current hourly batch; it is not a globally
-deduplicated contributor total.
+The ETL replaces all mart rows for a date after processing its hourly files.
+Use `--force` to reprocess a date whose hours are already marked successful.
+Contributor counts are summed from hourly distinct-actor counts, so they are
+not globally deduplicated across hours or repositories.
 
 ## Repository layout
 
@@ -138,7 +141,7 @@ deduplicated contributor total.
 .
 ├── etl/
 │   ├── config.py                # Loads PostgreSQL settings from .env
-│   ├── ingest.py                # Downloads, aggregates, and upserts GH Archive data
+│   ├── ingest.py                # Downloads and refreshes daily GH Archive summaries
 │   └── query_marts.py           # Small command-line query example
 ├── frontend/
 │   ├── src/
@@ -152,11 +155,22 @@ deduplicated contributor total.
 
 - **Dashboard reports a Supabase error:** Check the `frontend/.env` values,
   restart Vite, expose the `marts` schema in Supabase, and verify `SELECT`
-  permissions on `mart_repo_summary`.
+  permissions and an applicable RLS `SELECT` policy on `mart_repo_summary`.
+- **Dashboard reports `TypeError: Failed to fetch`:** Confirm that
+  `VITE_SUPABASE_URL` is the project's API URL (`https://<project-ref>.supabase.co`)
+  and that the publishable/anon key belongs to the same project. Restart Vite
+  after changing `frontend/.env`. Also check that the Supabase project is
+  available and that the browser or network is not blocking requests to it.
+  SQL permission checks do not verify that the browser can reach the API.
+- **Dashboard reports duplicate React keys:** Check for duplicate repository
+  rows for the same date. The mart should have a unique constraint or primary
+  key on `(repo_name, event_date)`; the ETL writes one summary row per
+  repository per date.
 - **Dashboard loads but shows older activity:** The page reads what is already
   stored in the table. Run the ETL for the needed date and check its output for
   unavailable GH Archive hours or database errors.
 - **ETL cannot connect:** Check the root `.env` database host, port, username,
   password, database name, and network access.
-- **A rerun inflated totals:** The current upsert is additive. It is not
-  idempotent for dates already processed.
+- **A completed date has no rows after a rerun:** The ETL skips hours already
+  marked successful unless `--force` is used. Re-run that date with `--force`
+  so its daily summary is rebuilt from the archived files.
