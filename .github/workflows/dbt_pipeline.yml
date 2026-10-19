@@ -50,4 +50,7 @@ jobs:
         run: |
           cd dbt_project
           dbt deps
-          dbt build --full-refresh --project-dir . --profiles-dir ~/.dbt
+          # Force dbt to create all the tables first
+          dbt run --full-refresh --project-dir . --profiles-dir ~/.dbt
+          # Then run the tests
+          dbt test --project-dir . --profiles-dir ~/.dbt
