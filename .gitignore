@@ -70,3 +70,4 @@ logs/
 *.swo
 .DS_Store
 Thumbs.db*.exe
+dbt_packages/
