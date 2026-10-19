@@ -20,10 +20,5 @@ packages-install-path: "dbt_packages"
 
 # Configure build schemas for your layers
 models:
-  +schema: marts
-  staging:
-    +schema: staging
-  intermediate:
-    +schema: intermediate
-  marts:
-    +schema: marts
+  gh_archive_analytics:
+    +materialized: view
