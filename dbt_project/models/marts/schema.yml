@@ -5,7 +5,8 @@ models:
     description: "Daily aggregate of repository activity."
     tests:
       - dbt_utils.unique_combination_of_columns:
-          combination_of_columns: [repo_name, activity_date]
+          arguments:
+            combination_of_columns: [repo_name, activity_date]
     columns:
       - name: repo_name
         tests: [not_null]

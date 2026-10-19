@@ -16,13 +16,14 @@ target-path: "target"
 clean-targets:
   - "target"
   - "dbt_packages"
+packages-install-path: "dbt_packages"
 
 # Configure build schemas for your layers
 models:
-  gh_archive_analytics:
-    staging:
-      +schema: staging
-    intermediate:
-      +schema: intermediate
-    marts:
-      +schema: marts
+  +schema: marts
+  staging:
+    +schema: staging
+  intermediate:
+    +schema: intermediate
+  marts:
+    +schema: marts
