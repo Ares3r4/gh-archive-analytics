@@ -1,0 +1,12 @@
+gh_archive_analytics:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var('DB_HOST') }}"
+      user: "{{ env_var('DB_USER') }}"
+      password: "{{ env_var('DB_PASSWORD') }}"
+      port: "{{ env_var('DB_PORT') | integer }}"
+      dbname: "{{ env_var('DB_NAME', 'postgres') }}"
+      schema: public
+      threads: 4

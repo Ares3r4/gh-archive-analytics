@@ -1,0 +1,28 @@
+name: 'gh_archive_analytics'
+version: '1.0.0'
+config-version: 2
+
+# This profile name must match the key in your profiles.yml
+profile: 'gh_archive_analytics'
+
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+# Configure build schemas for your layers
+models:
+  gh_archive_analytics:
+    staging:
+      +schema: staging
+    intermediate:
+      +schema: intermediate
+    marts:
+      +schema: marts
